@@ -1,0 +1,181 @@
+service: workflow-ia
+frameworkVersion: "4"
+
+provider:
+  name: aws
+  runtime: python3.14
+  stage: ${opt:stage, "dev"}
+  region: ${opt:region, "us-east-1"}
+  architecture: x86_64
+  iam:
+    role: arn:aws:iam::${aws:accountId}:role/LabRole
+  environment:
+    AGENTE_IA_API_URL: ${env:AGENTE_IA_API_URL}
+    SENDGRID_API_KEY: ${env:SENDGRID_API_KEY}
+    SENDGRID_FROM_EMAIL: ${env:SENDGRID_FROM_EMAIL}
+    SENDGRID_FROM_NAME: ${env:SENDGRID_FROM_NAME, "Workflow IA"}
+    RESULTS_TABLE_NAME:
+      Ref: WorkflowResultsTable
+  httpApi:
+    cors: true
+    payload: "2.0"
+
+functions:
+  startWorkflow:
+    name: ${self:service}-start-${sls:stage}
+    description: Inicia el workflow IA en Step Functions de forma asincrona.
+    handler: handler.start_workflow
+    timeout: 25
+    memorySize: 512
+    environment:
+      WORKFLOW_STATE_MACHINE_ARN:
+        Ref: WorkflowStateMachine
+    events:
+      - httpApi:
+          method: POST
+          path: /workflow
+
+  listMarkdownFiles:
+    name: ${self:service}-list-${sls:stage}
+    description: Lista markdown en S3 dentro de una carpeta.
+    handler: handler.list_markdown_files
+    timeout: 25
+    memorySize: 512
+
+  evaluateFile:
+    name: ${self:service}-eval-${sls:stage}
+    description: Evalua un markdown llamando al API agente IA y guarda en DynamoDB.
+    handler: handler.evaluate_file
+    timeout: 25
+    memorySize: 512
+
+  generateReport:
+    name: ${self:service}-report-${sls:stage}
+    description: Genera reporte CSV comparativo (separado por ;) y lo guarda en S3/resultados.
+    handler: handler.generate_report
+    timeout: 25
+    memorySize: 512
+
+  sendEmail:
+    name: ${self:service}-email-${sls:stage}
+    description: Envia correo final con reporte CSV adjunto usando SendGrid.
+    handler: handler.send_email
+    timeout: 25
+    memorySize: 512
+
+resources:
+  Resources:
+    WorkflowResultsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-resultados-${sls:stage}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: execution_id
+            AttributeType: S
+          - AttributeName: content_key
+            AttributeType: S
+        KeySchema:
+          - AttributeName: execution_id
+            KeyType: HASH
+          - AttributeName: content_key
+            KeyType: RANGE
+
+    WorkflowStateMachine:
+      Type: AWS::StepFunctions::StateMachine
+      Properties:
+        StateMachineName: ${self:service}-${sls:stage}
+        RoleArn: arn:aws:iam::${aws:accountId}:role/LabRole
+        DefinitionString:
+          Fn::Sub:
+            - |
+              {
+                "Comment": "Workflow IA serverless",
+                "StartAt": "ListMarkdownFiles",
+                "States": {
+                  "ListMarkdownFiles": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke",
+                    "OutputPath": "$.Payload",
+                    "Parameters": {
+                      "FunctionName": "${ListMarkdownFilesLambdaArn}",
+                      "Payload.$": "$"
+                    },
+                    "Next": "EvaluateFiles"
+                  },
+                  "EvaluateFiles": {
+                    "Type": "Map",
+                    "ItemsPath": "$.files",
+                    "MaxConcurrency": 5,
+                    "Parameters": {
+                      "instructions_s3_link.$": "$.instructions_s3_link",
+                      "content_s3_folder_link.$": "$.content_s3_folder_link",
+                      "content_bucket.$": "$.content_bucket",
+                      "email.$": "$.email",
+                      "workflow_execution_id.$": "$.workflow_execution_id",
+                      "content_s3_link.$": "$$.Map.Item.Value.content_s3_link",
+                      "content_key.$": "$$.Map.Item.Value.content_key",
+                      "file_name.$": "$$.Map.Item.Value.file_name"
+                    },
+                    "Iterator": {
+                      "StartAt": "EvaluateOneFile",
+                      "States": {
+                        "EvaluateOneFile": {
+                          "Type": "Task",
+                          "Resource": "arn:aws:states:::lambda:invoke",
+                          "OutputPath": "$.Payload",
+                          "Parameters": {
+                            "FunctionName": "${EvaluateFileLambdaArn}",
+                            "Payload.$": "$"
+                          },
+                          "End": true
+                        }
+                      }
+                    },
+                    "ResultPath": "$.evaluations",
+                    "Next": "GenerateReport"
+                  },
+                  "GenerateReport": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke",
+                    "OutputPath": "$.Payload",
+                    "Parameters": {
+                      "FunctionName": "${GenerateReportLambdaArn}",
+                      "Payload.$": "$"
+                    },
+                    "Next": "SendEmail"
+                  },
+                  "SendEmail": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke",
+                    "OutputPath": "$.Payload",
+                    "Parameters": {
+                      "FunctionName": "${SendEmailLambdaArn}",
+                      "Payload.$": "$"
+                    },
+                    "End": true
+                  }
+                }
+              }
+            - ListMarkdownFilesLambdaArn:
+                Fn::GetAtt: [ListMarkdownFilesLambdaFunction, Arn]
+              EvaluateFileLambdaArn:
+                Fn::GetAtt: [EvaluateFileLambdaFunction, Arn]
+              GenerateReportLambdaArn:
+                Fn::GetAtt: [GenerateReportLambdaFunction, Arn]
+              SendEmailLambdaArn:
+                Fn::GetAtt: [SendEmailLambdaFunction, Arn]
+
+  Outputs:
+    WorkflowEndpoint:
+      Description: Endpoint HTTP API para iniciar el workflow
+      Value:
+        Fn::Sub: https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/workflow
+    WorkflowStateMachineArn:
+      Description: ARN de la state machine
+      Value:
+        Ref: WorkflowStateMachine
+    WorkflowResultsTableName:
+      Description: Nombre de la tabla de resultados
+      Value:
+        Ref: WorkflowResultsTable
