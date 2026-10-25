@@ -17,7 +17,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"instructions_s3_link\": \"s3://mi-bucket/instrucciones.md\",\n  \"content_s3_folder_link\": \"s3://mi-bucket/contenido/\",\n  \"email\": \"usuario@dominio.com\"\n}"
+          "raw": "{\n  \"instructions_s3_link\": \"s3://mi-bucket/instrucciones.md\",\n  \"content_s3_folder_link\": \"s3://mi-bucket/contenido/\"\n}"
         },
         "url": {
           "raw": "{{baseUrl}}/workflow",

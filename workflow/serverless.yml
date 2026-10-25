@@ -11,9 +11,6 @@ provider:
     role: arn:aws:iam::${aws:accountId}:role/LabRole
   environment:
     AGENTE_IA_API_URL: ${env:AGENTE_IA_API_URL}
-    SENDGRID_API_KEY: ${env:SENDGRID_API_KEY}
-    SENDGRID_FROM_EMAIL: ${env:SENDGRID_FROM_EMAIL}
-    SENDGRID_FROM_NAME: ${env:SENDGRID_FROM_NAME, "Workflow IA"}
     RESULTS_TABLE_NAME:
       Ref: WorkflowResultsTable
   httpApi:
@@ -56,12 +53,6 @@ functions:
     timeout: 25
     memorySize: 512
 
-  sendEmail:
-    name: ${self:service}-email-${sls:stage}
-    description: Envia correo final con reporte CSV adjunto usando SendGrid.
-    handler: handler.send_email
-    timeout: 25
-    memorySize: 512
 
 resources:
   Resources:
@@ -111,7 +102,6 @@ resources:
                       "instructions_s3_link.$": "$.instructions_s3_link",
                       "content_s3_folder_link.$": "$.content_s3_folder_link",
                       "content_bucket.$": "$.content_bucket",
-                      "email.$": "$.email",
                       "workflow_execution_id.$": "$.workflow_execution_id",
                       "content_s3_link.$": "$$.Map.Item.Value.content_s3_link",
                       "content_key.$": "$$.Map.Item.Value.content_key",
@@ -143,16 +133,6 @@ resources:
                       "FunctionName": "${GenerateReportLambdaArn}",
                       "Payload.$": "$"
                     },
-                    "Next": "SendEmail"
-                  },
-                  "SendEmail": {
-                    "Type": "Task",
-                    "Resource": "arn:aws:states:::lambda:invoke",
-                    "OutputPath": "$.Payload",
-                    "Parameters": {
-                      "FunctionName": "${SendEmailLambdaArn}",
-                      "Payload.$": "$"
-                    },
                     "End": true
                   }
                 }
@@ -163,8 +143,6 @@ resources:
                 Fn::GetAtt: [EvaluateFileLambdaFunction, Arn]
               GenerateReportLambdaArn:
                 Fn::GetAtt: [GenerateReportLambdaFunction, Arn]
-              SendEmailLambdaArn:
-                Fn::GetAtt: [SendEmailLambdaFunction, Arn]
 
   Outputs:
     WorkflowEndpoint:

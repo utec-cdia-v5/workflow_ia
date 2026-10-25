@@ -10,11 +10,9 @@ Crea un workflow que use IA con estas funcionalidades:
   1. Recibe como entrada estos datos:
   - Ruta a archivo en bucket S3 en formato markdown con instrucciones para IA
   - Ruta a carpeta en bucket S3 que contenga archivos en formato markdown para evaluar con las instrucciones 
-  - Correo donde enviar el archivo con los resultados
   2. Por cada archivo debe llamar al Api Agente IA generica y enviarle como parametro la ruta del archivo de instrucciones y la ruta del archivo de contenido.
   3. El resultado del Api Agente IA generica (formato json) debe guardarlo en una tabla dynamodb.
   4. Debe generar un archivo en formato CSV con campos separados por punto y coma (;) y una tabla comparativa con el resultado del Api de todos los archivos evaluados, almacenarlo en el bucket en una carpeta "resultados".
-  5. Debe enviar un correo utilizando el Api de SendGrid adjuntando el archivo CSV anterior.
 
 ## Requisitos de la respuesta
 - Para la IaC (Infraestructura como codigo) utiliza el framework serverless version 4 con rol de IAM LabRole existente.

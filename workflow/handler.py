@@ -13,7 +13,6 @@ from urllib.request import Request, urlopen
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
-SENDGRID_API_URL = "https://api.sendgrid.com/v3/mail/send"
 CSV_ENCODING = "utf-8-sig"
 
 stepfunctions_client = boto3.client("stepfunctions")
@@ -73,7 +72,7 @@ def normalize_folder_prefix(prefix: str) -> str:
     return prefix if prefix.endswith("/") else f"{prefix}/"
 
 
-def extract_start_inputs(payload: Dict[str, Any]) -> Tuple[str, str, str]:
+def extract_start_inputs(payload: Dict[str, Any]) -> Tuple[str, str]:
     instructions_s3_link = (
         payload.get("instructions_s3_link")
         or payload.get("instrucciones_s3_link")
@@ -86,15 +85,10 @@ def extract_start_inputs(payload: Dict[str, Any]) -> Tuple[str, str, str]:
         or payload.get("folder_s3_link")
         or payload.get("content_s3_prefix")
     )
-    recipient_email = (
-        payload.get("email")
-        or payload.get("recipient_email")
-        or payload.get("correo")
-    )
 
-    if not instructions_s3_link or not content_s3_folder_link or not recipient_email:
+    if not instructions_s3_link or not content_s3_folder_link:
         raise ValueError(
-            "Debes enviar instructions_s3_link, content_s3_folder_link y email."
+            "Debes enviar instructions_s3_link y content_s3_folder_link."
         )
 
     _, instructions_key = parse_s3_uri(instructions_s3_link)
@@ -103,10 +97,7 @@ def extract_start_inputs(payload: Dict[str, Any]) -> Tuple[str, str, str]:
 
     parse_s3_uri(content_s3_folder_link)
 
-    if "@" not in recipient_email:
-        raise ValueError("El campo email no parece valido.")
-
-    return instructions_s3_link, content_s3_folder_link, recipient_email
+    return instructions_s3_link, content_s3_folder_link
 
 
 def post_json(
@@ -159,7 +150,7 @@ def call_agente_ia_api(instructions_s3_link: str, content_s3_link: str) -> Any:
 def start_workflow(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     try:
         payload = parse_request_body(event)
-        instructions_s3_link, content_s3_folder_link, recipient_email = extract_start_inputs(
+        instructions_s3_link, content_s3_folder_link = extract_start_inputs(
             payload
         )
     except ValueError as error:
@@ -174,7 +165,6 @@ def start_workflow(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
         execution_input = {
             "instructions_s3_link": instructions_s3_link,
             "content_s3_folder_link": content_s3_folder_link,
-            "email": recipient_email,
             "workflow_execution_id": execution_name,
             "requested_at": iso_utc_now(),
         }
@@ -208,13 +198,11 @@ def start_workflow(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
 def list_markdown_files(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     instructions_s3_link = event.get("instructions_s3_link")
     content_s3_folder_link = event.get("content_s3_folder_link")
-    recipient_email = event.get("email")
     workflow_execution_id = event.get("workflow_execution_id")
 
     if (
         not instructions_s3_link
         or not content_s3_folder_link
-        or not recipient_email
         or not workflow_execution_id
     ):
         raise ValueError("Input incompleto para listar archivos markdown.")
@@ -253,7 +241,6 @@ def list_markdown_files(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
         "content_s3_folder_link": content_s3_folder_link,
         "content_bucket": content_bucket,
         "content_prefix": content_prefix,
-        "email": recipient_email,
         "workflow_execution_id": workflow_execution_id,
         "files": files,
         "total_files": len(files),
@@ -353,12 +340,11 @@ def build_csv_report(evaluations: List[Dict[str, Any]], columns: List[str]) -> s
 
 
 def generate_report(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
-    recipient_email = event.get("email")
     content_bucket = event.get("content_bucket")
     workflow_execution_id = event.get("workflow_execution_id", "workflow-sin-id")
     evaluations = event.get("evaluations", [])
 
-    if not recipient_email or not content_bucket:
+    if not content_bucket:
         raise ValueError("Input incompleto para generar reporte.")
 
     if not isinstance(evaluations, list) or not evaluations:
@@ -383,79 +369,10 @@ def generate_report(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
         raise RuntimeError(f"No fue posible guardar el reporte en S3: {error}") from error
 
     return {
-        "email": recipient_email,
         "workflow_execution_id": workflow_execution_id,
         "files_processed": len(evaluations),
         "report_bucket": content_bucket,
         "report_key": report_key,
         "report_s3_link": f"s3://{content_bucket}/{report_key}",
         "report_file_name": report_file_name,
-        "attachment_base64": base64.b64encode(csv_bytes).decode(
-            "ascii"
-        ),
-    }
-
-
-def send_email(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
-    recipient_email = event.get("email")
-    report_s3_link = event.get("report_s3_link")
-    report_file_name = event.get("report_file_name", "resultados.csv")
-    attachment_base64 = event.get("attachment_base64")
-    workflow_execution_id = event.get("workflow_execution_id", "workflow-sin-id")
-    files_processed = event.get("files_processed", 0)
-
-    if not recipient_email or not report_s3_link or not attachment_base64:
-        raise ValueError("Input incompleto para enviar correo.")
-
-    sendgrid_api_key = require_env("SENDGRID_API_KEY")
-    sendgrid_from_email = require_env("SENDGRID_FROM_EMAIL")
-    sendgrid_from_name = os.getenv("SENDGRID_FROM_NAME", "Workflow IA")
-
-    payload = {
-        "personalizations": [{"to": [{"email": recipient_email}]}],
-        "from": {
-            "email": sendgrid_from_email,
-            "name": sendgrid_from_name,
-        },
-        "subject": f"Resultados workflow IA {workflow_execution_id}",
-        "content": [
-            {
-                "type": "text/plain",
-                "value": (
-                    "El workflow finalizo correctamente. "
-                    f"Archivos evaluados: {files_processed}. "
-                    f"Reporte CSV almacenado en {report_s3_link}."
-                ),
-            }
-        ],
-        "attachments": [
-            {
-                "content": attachment_base64,
-                "filename": report_file_name,
-                "type": "text/csv",
-                "disposition": "attachment",
-            }
-        ],
-    }
-
-    status_code, _ = post_json(
-        url=SENDGRID_API_URL,
-        payload=payload,
-        headers={
-            "Authorization": f"Bearer {sendgrid_api_key}",
-            "Content-Type": "application/json",
-            "User-Agent": "workflow-ia/1.0",
-        },
-        timeout_seconds=30,
-    )
-
-    if status_code not in {200, 202}:
-        raise RuntimeError(f"SendGrid devolvio estado inesperado: {status_code}")
-
-    return {
-        "message": "Correo enviado correctamente.",
-        "email": recipient_email,
-        "report_s3_link": report_s3_link,
-        "files_processed": files_processed,
-        "workflow_execution_id": workflow_execution_id,
     }
